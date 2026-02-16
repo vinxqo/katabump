@@ -358,6 +358,44 @@ async function attemptTurnstileCdp(page) {
                 const pwdInput = page.getByRole('textbox', { name: 'Password' });
                 await pwdInput.fill(user.password);
                 await page.waitForTimeout(500);
+
+                // --- Cloudflare Turnstile Bypass for Login ---
+                console.log('   >> Checking for Turnstile before login (using CDP bypass)...');
+                let cdpClickResult = false;
+                for (let findAttempt = 0; findAttempt < 15; findAttempt++) {
+                    cdpClickResult = await attemptTurnstileCdp(page);
+                    if (cdpClickResult) break;
+                    // console.log(`   >> [Login Find Attempt ${findAttempt + 1}/15] Turnstile checkbox not found yet...`);
+                    await page.waitForTimeout(1000);
+                }
+
+                if (cdpClickResult) {
+                    console.log('   >> CDP Click active for login. Waiting up to 10s for Cloudflare success...');
+                    // Wait for the "Success!" mark in any cloudflare frame
+                    for (let waitSec = 0; waitSec < 10; waitSec++) {
+                        const frames = page.frames();
+                        let isSuccess = false;
+                        for (const f of frames) {
+                            if (f.url().includes('cloudflare')) {
+                                try {
+                                    if (await f.getByText('Success!', { exact: false }).isVisible({ timeout: 500 })) {
+                                        isSuccess = true;
+                                        break;
+                                    }
+                                } catch (e) { }
+                            }
+                        }
+                        if (isSuccess) {
+                            console.log('   >> Turnstile verification successful before login.');
+                            break;
+                        }
+                        await page.waitForTimeout(1000);
+                    }
+                } else {
+                    console.log('   >> No Turnstile detected or clicked before login, proceeding anyway...');
+                }
+                // --------------------------------------------
+
                 await page.getByRole('button', { name: 'Login', exact: true }).click();
 
                 // User Request: Check for "Incorrect password or no account"
