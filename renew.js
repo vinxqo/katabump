@@ -266,15 +266,19 @@ async function attemptTurnstileCdp(page) {
 }
 
 /**
- * ALTCHA captcha bypass using coordinate-based CDP click.
+ * ALTCHA captcha bypass using the existing inject script's shadow-root hook.
  *
- * ALTCHA uses a closed Shadow DOM, so widget.shadowRoot is null from JS.
- * We get the bounding box of the <altcha-widget> host element (a normal DOM
- * node) and use CDP to dispatch a native mouse click at the checkbox position.
+ * The inject script patches Element.prototype.attachShadow and intercepts ALL
+ * shadow roots — including ALTCHA's closed one. When it finds a checkbox inside,
+ * it stores the checkbox's viewport-relative ratios in window.__turnstile_data.
+ *
+ * attemptTurnstileCdp() already reads that data but skips the main frame because
+ * frame.frameElement() returns null for non-iframes. Here we handle that case:
+ * we read the stored ratios and multiply directly by the viewport size.
  */
 async function attemptAltchaClick(page) {
     try {
-        // Check if already verified (state attr is exposed on the host element)
+        // Check if already verified (state attr is public on the host element)
         const alreadyDone = await page.evaluate(() => {
             const w = document.querySelector('altcha-widget');
             return w && w.getAttribute('state') === 'verified';
@@ -284,22 +288,23 @@ async function attemptAltchaClick(page) {
             return true;
         }
 
-        // Get the bounding box of the altcha-widget host element
-        const altchaLocator = page.locator('altcha-widget').first();
-        const box = await altchaLocator.boundingBox().catch(() => null);
+        // Read the ratios stored by the inject script's attachShadow hook.
+        // This works even for closed shadow roots because the hook runs before
+        // ALTCHA's code and captures the shadow root reference at creation time.
+        const data = await page.evaluate(() => window.__turnstile_data).catch(() => null);
 
-        if (!box) {
-            console.log('   >> ALTCHA widget not found or has no bounding box.');
+        if (!data || !data.xRatio || !data.yRatio) {
+            console.log('   >> window.__turnstile_data not set yet (inject script has not captured ALTCHA checkbox).');
             return false;
         }
 
-        // The checkbox sits near the left edge, vertically centred.
-        // ALTCHA default layout puts the checkbox ~20px from the left.
-        const clickX = box.x + 20;
-        const clickY = box.y + (box.height / 2);
+        // Compute absolute CSS pixel coordinates from stored ratios + viewport size.
+        const dims = await page.evaluate(() => ({ w: window.innerWidth, h: window.innerHeight }));
+        const clickX = dims.w * data.xRatio;
+        const clickY = dims.h * data.yRatio;
 
-        console.log(`   >> ALTCHA widget at (${box.x.toFixed(0)},${box.y.toFixed(0)}) size ${box.width.toFixed(0)}x${box.height.toFixed(0)}`);
-        console.log(`   >> CDP-clicking ALTCHA checkbox at (${clickX.toFixed(0)}, ${clickY.toFixed(0)})`);
+        console.log(`   >> ALTCHA checkbox ratios: x=${data.xRatio.toFixed(4)}, y=${data.yRatio.toFixed(4)}`);
+        console.log(`   >> CDP-clicking ALTCHA checkbox at (${clickX.toFixed(1)}, ${clickY.toFixed(1)}) [viewport ${dims.w}x${dims.h}]`);
 
         const client = await page.context().newCDPSession(page);
         await client.send('Input.dispatchMouseEvent', {
@@ -544,12 +549,18 @@ async function waitForAltchaComplete(page, timeoutMs = 30000) {
                         if (box) await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 5 });
                     } catch (e) { }
 
-                    // B. Try ALTCHA first (site switched from Turnstile to ALTCHA)
-                    console.log('   >> Checking for ALTCHA captcha...');
+                    // B. Try ALTCHA first (site switched from Turnstile to ALTCHA).
+                    // The inject script sets window.__turnstile_data once it finds a
+                    // checkbox inside any shadow root. Poll for it (up to 10s) so we
+                    // don't click before the ALTCHA widget has rendered.
+                    console.log('   >> Waiting for ALTCHA inject-script data...');
                     let captchaResolved = false;
-
-                    // Give the modal a moment to fully render the ALTCHA widget
-                    await page.waitForTimeout(1500);
+                    const altchaDataDeadline = Date.now() + 10000;
+                    while (Date.now() < altchaDataDeadline) {
+                        const hasData = await page.evaluate(() => !!(window.__turnstile_data && window.__turnstile_data.xRatio)).catch(() => false);
+                        if (hasData) break;
+                        await page.waitForTimeout(300);
+                    }
 
                     const altchaClicked = await attemptAltchaClick(page);
                     if (altchaClicked) {
