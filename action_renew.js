@@ -298,6 +298,86 @@ async function attemptTurnstileCdp(page) {
     return false;
 }
 
+async function clickLocatorCenter(page, locator, logMessage) {
+    const box = await locator.boundingBox();
+    if (box) {
+        await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 8 });
+        await page.mouse.down();
+        await page.waitForTimeout(80 + Math.random() * 120);
+        await page.mouse.up();
+    } else {
+        await locator.click({ timeout: 2000 });
+    }
+    console.log(logMessage);
+    return true;
+}
+
+async function clickVisibleCaptchaCheckbox(page, modal) {
+    const frameSelectors = ['input[type="checkbox"]', '[role="checkbox"]'];
+    for (const frame of page.frames()) {
+        try {
+            for (const selector of frameSelectors) {
+                const checkbox = frame.locator(selector).first();
+                if (await checkbox.isVisible({ timeout: 500 })) {
+                    await checkbox.click({ timeout: 2000 });
+                    console.log('   >> 已点击 frame 内可见 Captcha 复选框。');
+                    return true;
+                }
+            }
+        } catch (e) { }
+    }
+
+    const selectors = [
+        'input[type="checkbox"]',
+        'altcha-widget input[type="checkbox"]',
+        '[role="checkbox"]'
+    ];
+
+    for (const selector of selectors) {
+        try {
+            const checkbox = modal.locator(selector).first();
+            if (await checkbox.isVisible({ timeout: 1000 })) {
+                return await clickLocatorCenter(page, checkbox, '   >> 已点击模态框内可见 Captcha 复选框。');
+            }
+        } catch (e) { }
+    }
+
+    try {
+        const checkboxByRole = modal.getByRole('checkbox').first();
+        if (await checkboxByRole.isVisible({ timeout: 1000 })) {
+            return await clickLocatorCenter(page, checkboxByRole, '   >> 已按角色点击 Captcha 复选框。');
+        }
+    } catch (e) { }
+
+    const widgetSelectors = ['altcha-widget', 'iframe[title*="captcha" i]', 'iframe'];
+    for (const selector of widgetSelectors) {
+        try {
+            const widget = modal.locator(selector).first();
+            if (await widget.isVisible({ timeout: 1000 })) {
+                const box = await widget.boundingBox();
+                if (!box) continue;
+                const clickX = box.x + Math.min(28, Math.max(18, box.width * 0.12));
+                const clickY = box.y + box.height / 2;
+                await page.mouse.move(clickX, clickY, { steps: 8 });
+                await page.mouse.down();
+                await page.waitForTimeout(80 + Math.random() * 120);
+                await page.mouse.up();
+                console.log('   >> 已按 Captcha 组件坐标点击复选框区域。');
+                return true;
+            }
+        } catch (e) { }
+    }
+
+    try {
+        const text = modal.getByText("I'm not a robot", { exact: false }).first();
+        if (await text.isVisible({ timeout: 1000 })) {
+            return await clickLocatorCenter(page, text, '   >> 已点击 Captcha 文本区域。');
+        }
+    } catch (e) { }
+
+    return false;
+}
+
 (async () => {
     const users = getUsers();
     if (users.length === 0) {
@@ -500,7 +580,14 @@ async function attemptTurnstileCdp(page) {
                         console.log('   >> CDP 点击生效。等待 8秒 Cloudflare 检查...');
                         await page.waitForTimeout(8000);
                     } else {
-                        console.log('   >> 重试后仍未确认 Turnstile 复选框。');
+                        console.log('   >> 重试后仍未确认 Turnstile 复选框，尝试识别当前模态框内可见复选框...');
+                        const checkboxClickResult = await clickVisibleCaptchaCheckbox(page, modal);
+                        if (checkboxClickResult) {
+                            console.log('   >> 可见复选框点击已发送。等待 8秒验证...');
+                            await page.waitForTimeout(8000);
+                        } else {
+                            console.log('   >> 当前模态框内仍未找到可点击的 Captcha 复选框。');
+                        }
                     }
 
                     // C. 检查 Success 标志
